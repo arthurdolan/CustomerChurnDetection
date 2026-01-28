@@ -1,1 +1,1 @@
-# CustomerChurnDetection
+To run the app on macOS or Windows, first ensure Python 3.9+ is installed. In the project directory, install dependencies with pip install -r requirements.txt, then start the application using python3 -m streamlit run app.py (on Windows, use python -m streamlit run app.py). The dashboard will open automatically in your browser at http://localhost:8501.
