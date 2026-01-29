@@ -6,9 +6,25 @@ Main application entry point.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 from utils import load_dataset, identify_columns, preprocess_data, prepare_features
 from model import train_model, predict_churn
-from actions import send_retention_email, offer_discount, flag_for_call, get_action_history
+from actions import (
+    send_retention_email,
+    offer_discount,
+    flag_for_call,
+    prioritize_success_call,
+    send_personalized_retention_email,
+    flag_short_term_monitoring,
+    send_feature_education_email,
+    send_usage_reminder,
+    add_to_experiment_cohort,
+    issue_loyalty_reward,
+    send_upsell_recommendation,
+    send_referral_incentive,
+    request_feedback_review,
+    get_action_history,
+)
 
 # Page configuration
 st.set_page_config(
@@ -125,7 +141,7 @@ def render_upload_page():
     if st.session_state.df_raw is not None:
         df = st.session_state.df_raw
         source = st.session_state.dataset_source_name or "Dataset"
-        
+
         st.write(
             f"Active dataset: {source.split(':')[-1].strip()} | "
             f"Rows: {len(df):,} | Columns: {len(df.columns)}"
@@ -168,13 +184,13 @@ def render_upload_page():
 def render_churn_dashboard():
     """Render the Churn Prediction Dashboard page."""
     st.title("Churn Scoring")
-    
+
     if st.session_state.df_results is None:
         st.write("No data available. Please upload a dataset first.")
         return
-    
+
     df_results = st.session_state.df_results.copy()
-    
+
     st.markdown("### Threshold Settings")
     threshold = st.slider(
         "High Risk Threshold",
@@ -185,21 +201,21 @@ def render_churn_dashboard():
         format="%.2f"
     )
     st.session_state.high_risk_threshold = threshold
-    
+
     st.caption(
         f"Risk categories — Low: < 0.30 | Medium: 0.30–{threshold:.2f} | High: > {threshold:.2f}"
     )
-    
+
     df_results['risk_level'] = df_results['churn_probability'].apply(
         lambda x: 'High' if x > threshold else ('Medium' if x >= 0.3 else 'Low')
     )
-    
+
     st.markdown("### Risk Summary")
     high_count = (df_results['risk_level'] == 'High').sum()
     medium_count = (df_results['risk_level'] == 'Medium').sum()
     low_count = (df_results['risk_level'] == 'Low').sum()
     avg_prob = df_results['churn_probability'].mean()
-    
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("High Risk", f"{high_count:,}", f"{high_count/len(df_results)*100:.1f}%")
@@ -209,18 +225,26 @@ def render_churn_dashboard():
         st.metric("Low Risk", f"{low_count:,}", f"{low_count/len(df_results)*100:.1f}%")
     with col4:
         st.metric("Avg Probability", f"{avg_prob:.3f}")
-    
+
     st.markdown("### Distribution")
-    risk_counts = df_results['risk_level'].value_counts()
-    for level in ['Low', 'Medium', 'High']:
-        if level not in risk_counts.index:
-            risk_counts[level] = 0
-    risk_counts = risk_counts.reindex(['Low', 'Medium', 'High'])
-    chart_data = pd.DataFrame({'Count': risk_counts.values}, index=risk_counts.index)
-    st.bar_chart(chart_data, height=250)
-    
+    order = ["Low", "Medium", "High"]
+    risk_counts = df_results["risk_level"].value_counts().reindex(order, fill_value=0)
+    chart_data = pd.DataFrame(
+        {"Risk level": order, "Customers": risk_counts.values}
+    )
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar()
+        .encode(
+            x=alt.X("Risk level:N", sort=order),
+            y=alt.Y("Customers:Q"),
+        )
+        .properties(height=250)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
     st.markdown("### Customer Scores")
-    
+
     col_filter, col_sort = st.columns(2)
     with col_filter:
         filter_risk = st.multiselect(
@@ -230,22 +254,22 @@ def render_churn_dashboard():
         )
     with col_sort:
         sort_desc = st.checkbox("Sort by highest risk first", value=True)
-    
+
     df_filtered = df_results[df_results['risk_level'].isin(filter_risk)].copy()
     df_sorted = df_filtered.sort_values('churn_probability', ascending=not sort_desc)
-    
+
     display_cols = ['churn_probability', 'risk_level']
     if st.session_state.customer_id_col and st.session_state.customer_id_col in df_sorted.columns:
         display_cols.insert(0, st.session_state.customer_id_col)
-    
+
     df_display = df_sorted[display_cols].copy()
     df_display['churn_probability'] = df_display['churn_probability'].apply(lambda x: f"{x:.4f}")
-    
+
     st.dataframe(df_display, use_container_width=True, hide_index=True, height=450)
     st.caption(f"Showing {len(df_display):,} of {len(df_results):,} customers")
-    
+
     st.write("")
-    
+
     csv = df_results.to_csv(index=False)
     st.download_button(
         "Download Results",
@@ -258,76 +282,220 @@ def render_churn_dashboard():
 def render_retention_actions():
     """Render the Retention Actions page."""
     st.title("Retention Actions")
-    
+
     if st.session_state.df_results is None:
         st.write("No data available. Please upload a dataset first.")
         return
-    
+
     df_results = st.session_state.df_results.copy()
     threshold = st.session_state.high_risk_threshold
-    
+
     df_results['risk_level'] = df_results['churn_probability'].apply(
         lambda x: 'High' if x > threshold else ('Medium' if x >= 0.3 else 'Low')
     )
-    
-    high_risk_df = df_results[df_results['risk_level'] == 'High'].copy()
-    
-    if len(high_risk_df) == 0:
-        st.write("No high-risk customers.")
-        st.caption(
-            f"No customers exceed the current threshold of {threshold:.2f}. "
-            "Adjust the threshold in Churn Scoring to identify at-risk customers."
-        )
+
+    customer_id_col = st.session_state.customer_id_col or "CustomerID"
+    if customer_id_col not in df_results.columns:
+        st.error("Customer ID column not found.")
         return
-    
-    st.write(f"{len(high_risk_df):,} high-risk customers.")
-    st.caption(
-        f"These customers have a churn probability above {threshold:.2f} and may need attention."
+
+    def get_actions_for_risk(level: str):
+        if level == "High":
+            return [
+                {
+                    "key": "priority_call",
+                    "name": "Priority customer success call",
+                    "desc": "Escalate to a senior retention specialist.",
+                    "cost": "High cost",
+                    "handler": prioritize_success_call,
+                },
+                {
+                    "key": "high_discount",
+                    "name": "High-value discount",
+                    "desc": "Offer a stronger incentive to prevent churn.",
+                    "cost": "High cost",
+                    "handler": offer_discount,
+                    "discount": {"min": 15, "max": 30, "default": 20},
+                },
+                {
+                    "key": "personalized_email",
+                    "name": "Personalized retention email",
+                    "desc": "Send a tailored message based on recent activity.",
+                    "cost": "Medium cost",
+                    "handler": send_personalized_retention_email,
+                },
+                {
+                    "key": "monitoring",
+                    "name": "Short-term monitoring",
+                    "desc": "Flag account for monitoring over the next 14 days.",
+                    "cost": "Medium cost",
+                    "handler": flag_short_term_monitoring,
+                },
+            ]
+        if level == "Medium":
+            return [
+                {
+                    "key": "targeted_discount",
+                    "name": "Targeted discount",
+                    "desc": "Small incentive to encourage another purchase.",
+                    "cost": "Medium cost",
+                    "handler": offer_discount,
+                    "discount": {"min": 5, "max": 10, "default": 7},
+                },
+                {
+                    "key": "feature_email",
+                    "name": "Feature education email",
+                    "desc": "Highlight useful features to increase engagement.",
+                    "cost": "Low cost",
+                    "handler": send_feature_education_email,
+                },
+                {
+                    "key": "usage_nudge",
+                    "name": "Usage reminder / inactivity nudge",
+                    "desc": "Remind customers to return and complete an order.",
+                    "cost": "Low cost",
+                    "handler": send_usage_reminder,
+                },
+                {
+                    "key": "experiment",
+                    "name": "Retention experiment cohort",
+                    "desc": "Add to a targeted retention experiment.",
+                    "cost": "Medium cost",
+                    "handler": add_to_experiment_cohort,
+                },
+            ]
+        return [
+            {
+                "key": "loyalty_reward",
+                "name": "Loyalty reward / points",
+                "desc": "Reinforce loyalty with points or credits.",
+                "cost": "Low cost",
+                "handler": issue_loyalty_reward,
+            },
+            {
+                "key": "upsell",
+                "name": "Upsell or cross-sell recommendation",
+                "desc": "Recommend a complementary product.",
+                "cost": "Medium cost",
+                "handler": send_upsell_recommendation,
+            },
+            {
+                "key": "referral",
+                "name": "Referral incentive",
+                "desc": "Invite customers to refer others.",
+                "cost": "Medium cost",
+                "handler": send_referral_incentive,
+            },
+            {
+                "key": "feedback",
+                "name": "Feedback or review request",
+                "desc": "Collect feedback to improve retention.",
+                "cost": "Low cost",
+                "handler": request_feedback_review,
+            },
+        ]
+
+    def run_action(action, customer_ids, discount_value=None):
+        for customer_id in customer_ids:
+            if discount_value is not None:
+                action["handler"](customer_id, discount_value)
+            else:
+                action["handler"](customer_id)
+
+    # Bulk actions by risk category
+    st.markdown("### Recommended actions for this risk level")
+    risk_category = st.selectbox(
+        "Risk category",
+        ["High", "Medium", "Low"],
+        help="Apply actions to all customers in a selected risk category",
     )
-    
-    customer_id_col = st.session_state.customer_id_col or 'CustomerID'
-    if customer_id_col not in high_risk_df.columns:
-        st.error(f"Customer ID column not found.")
-        return
-    
+
+    category_df = df_results[df_results["risk_level"] == risk_category].copy()
+    st.caption(f"{len(category_df):,} customers in {risk_category.lower()} risk.")
+
+    actions = get_actions_for_risk(risk_category)
+    for action in actions:
+        st.write(f"**{action['name']}** — {action['desc']}")
+        st.caption(action["cost"])
+
+        if "discount" in action:
+            discount_value = st.number_input(
+                "Discount %",
+                min_value=action["discount"]["min"],
+                max_value=action["discount"]["max"],
+                value=action["discount"]["default"],
+                step=1,
+                key=f"bulk_{action['key']}_discount",
+            )
+            if st.button(
+                f"Apply to all {risk_category.lower()} risk",
+                key=f"bulk_{action['key']}_btn",
+            ):
+                run_action(action, category_df[customer_id_col].astype(str).tolist(), discount_value)
+                st.success("Action applied to selected risk category.")
+        else:
+            if st.button(
+                f"Apply to all {risk_category.lower()} risk",
+                key=f"bulk_{action['key']}_btn",
+            ):
+                run_action(action, category_df[customer_id_col].astype(str).tolist())
+                st.success("Action applied to selected risk category.")
+
+        st.write("")
+
+    st.markdown("### Individual customer actions")
     col_left, col_right = st.columns([1, 1])
-    
+
     with col_left:
         st.markdown("### Select Customer")
-        customer_options = high_risk_df.sort_values('churn_probability', ascending=False)[customer_id_col].tolist()
+        customer_options = df_results.sort_values("churn_probability", ascending=False)[
+            customer_id_col
+        ].tolist()
         selected = st.selectbox(
             "Customer",
             customer_options,
-            format_func=lambda x: f"{x} — {high_risk_df[high_risk_df[customer_id_col]==x]['churn_probability'].iloc[0]:.3f}"
+            format_func=lambda x: f"{x} — {df_results[df_results[customer_id_col]==x]['churn_probability'].iloc[0]:.3f}",
         )
-        
+
         if selected:
-            data = high_risk_df[high_risk_df[customer_id_col] == selected].iloc[0]
-            
+            data = df_results[df_results[customer_id_col] == selected].iloc[0]
+
             st.markdown("### Customer Details")
             st.metric("Churn Probability", f"{data['churn_probability']:.4f}")
             st.metric("Customer ID", str(selected))
-            
+
             percentile = (df_results['churn_probability'] < data['churn_probability']).sum() / len(df_results) * 100
             st.metric("Risk Percentile", f"{percentile:.1f}%")
-    
+
     with col_right:
         if selected:
-            st.markdown("### Take Action")
-            
-            if st.button("Send Retention Email", use_container_width=True):
-                result = send_retention_email(str(selected))
-                st.success(result['message'])
-            
-            if st.button("Flag for Call", use_container_width=True):
-                result = flag_for_call(str(selected))
-                st.success(result['message'])
-            
-            discount = st.number_input("Discount %", min_value=5, max_value=50, value=15, step=5)
-            if st.button("Send Discount Offer", use_container_width=True):
-                result = offer_discount(str(selected), discount)
-                st.success(result['message'])
-            
+            risk_level = data["risk_level"]
+            st.markdown("### Recommended actions for this risk level")
+            actions = get_actions_for_risk(risk_level)
+
+            for action in actions:
+                st.write(f"**{action['name']}** — {action['desc']}")
+                st.caption(action["cost"])
+
+                if "discount" in action:
+                    discount_value = st.number_input(
+                        "Discount %",
+                        min_value=action["discount"]["min"],
+                        max_value=action["discount"]["max"],
+                        value=action["discount"]["default"],
+                        step=1,
+                        key=f"ind_{action['key']}_discount",
+                    )
+                    if st.button(action["name"], key=f"ind_{action['key']}_btn"):
+                        run_action(action, [str(selected)], discount_value)
+                        st.success("Action logged.")
+                else:
+                    if st.button(action["name"], key=f"ind_{action['key']}_btn"):
+                        run_action(action, [str(selected)])
+                        st.success("Action logged.")
+
+                st.write("")
+
             st.markdown("### Action History")
             history = get_action_history(str(selected))
             if len(history) > 0:
